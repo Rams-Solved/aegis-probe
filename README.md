@@ -45,6 +45,22 @@ No target yet? Try it with zero setup:
 aegis-probe --mock
 ```
 
+### Interactive shell
+
+Running `aegis-probe` with no arguments at all drops you into a persistent interactive shell instead of printing a usage error:
+
+```bash
+aegis-probe
+```
+
+```
+aegis ❯ help     # print the full help layout
+aegis ❯ mock     # run the local --mock simulation inline, then return to the prompt
+aegis ❯ exit     # (or quit, or Ctrl+C) leave cleanly
+```
+
+Any invocation with at least one argument (`--mock`, `--list`, `--url ...`, `--help`, etc.) skips the shell entirely and runs as a normal one-shot command.
+
 ## Usage
 
 ```

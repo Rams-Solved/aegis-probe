@@ -1,5 +1,6 @@
 #!/usr/bin/env -S npx tsx
 import { Command } from "commander";
+import { createInterface } from "node:readline/promises";
 import { allAttacks, attacksByCategory } from "../src/attacks/index.js";
 import { FREE_TIER_THROTTLE_MS, isFreeTierJudge, runAttacks, sleep } from "../src/probe.js";
 import { gradeAll } from "../src/judge.js";
@@ -101,9 +102,6 @@ program
     return lines.join("\n");
   });
 
-program.parse(process.argv);
-const opts = program.opts();
-
 function parseHeaders(headerArgs: string[] | undefined): Record<string, string> {
   const headers: Record<string, string> = {};
   for (const h of headerArgs ?? []) {
@@ -120,6 +118,9 @@ function parseHeaders(headerArgs: string[] | undefined): Record<string, string> 
 }
 
 async function main() {
+  program.parse(process.argv);
+  const opts = program.opts();
+
   if (opts.list) {
     console.log(`\n${banner()}\n`);
     for (const category of CATEGORIES) {
@@ -275,7 +276,90 @@ async function runMock(
   process.exitCode = anyBroke ? 1 : 0;
 }
 
-main().catch((err) => {
-  console.error("aegis-probe failed:", err instanceof Error ? err.message : err);
-  process.exitCode = 1;
-});
+/** Exact Aegis palette prompt, per spec — purple "aegis" label, blue "❯" caret. */
+const REPL_PROMPT = "\x1b[38;5;141maegis \x1b[38;5;39m❯ \x1b[0m";
+
+/**
+ * A persistent interactive shell for aegis-probe, entered when the CLI is
+ * launched with zero arguments. Deliberately minimal: `mock` runs the same
+ * local simulation as `--mock`, `help` reuses commander's own formatted
+ * help text, and `exit`/`quit` (or Ctrl+C) leave cleanly.
+ */
+async function runRepl(): Promise<void> {
+  process.stdout.write("\x1b[2J\x1b[3J\x1b[H"); // clear screen + scrollback, cursor home
+  console.log(`\n${banner()}\n${DIM}  adversarial red-teaming for LLM chat endpoints${RESET}\n`);
+  console.log(
+    `${DIM}Type ${RESET}${BOLD}help${RESET}${DIM} for commands, ${RESET}${BOLD}mock${RESET}${DIM} to run a local demo, or ${RESET}${BOLD}exit${RESET}${DIM} to quit.${RESET}\n`,
+  );
+
+  const rl = createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    prompt: REPL_PROMPT,
+  });
+
+  let closed = false;
+  rl.on("close", () => {
+    closed = true;
+  });
+  // Let readline own Ctrl+C: without a listener here, a bare SIGINT during
+  // interactive input can surface as an abrupt/uncaught interrupt instead of
+  // a clean shutdown.
+  rl.on("SIGINT", () => {
+    console.log();
+    process.exitCode = 0;
+    rl.close();
+  });
+
+  rl.prompt();
+
+  for await (const rawLine of rl) {
+    const line = rawLine.trim();
+
+    if (line) {
+      const [cmd] = line.split(/\s+/);
+      switch (cmd.toLowerCase()) {
+        case "mock": {
+          console.log("");
+          await runMock(allAttacks, "table", true);
+          console.log("");
+          break;
+        }
+        case "help": {
+          // outputHelp() (not helpInformation()) so the addHelpText hooks —
+          // QUICK START, EXAMPLES, judge setup — render exactly as they do
+          // for `--help`, not just the bare usage/options block.
+          program.outputHelp();
+          break;
+        }
+        case "exit":
+        case "quit": {
+          process.exitCode = 0;
+          rl.close();
+          break;
+        }
+        default: {
+          console.log(
+            `${DIM}Unknown command: ${RESET}${BOLD}${cmd}${RESET}${DIM}. Type ${RESET}${BOLD}help${RESET}${DIM} to see available commands.${RESET}\n`,
+          );
+        }
+      }
+    }
+
+    if (!closed) rl.prompt();
+  }
+
+  console.log(`${DIM}goodbye.${RESET}`);
+}
+
+if (process.argv.length <= 2) {
+  runRepl().catch((err) => {
+    console.error("aegis-probe REPL failed:", err instanceof Error ? err.message : err);
+    process.exitCode = 1;
+  });
+} else {
+  main().catch((err) => {
+    console.error("aegis-probe failed:", err instanceof Error ? err.message : err);
+    process.exitCode = 1;
+  });
+}
