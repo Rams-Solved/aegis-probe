@@ -192,6 +192,61 @@ export class Spinner {
   }
 }
 
+function padVisible(text: string, width: number): string {
+  if (text.length >= width) return text.slice(0, width);
+  return text + " ".repeat(width - text.length);
+}
+
+function wrapText(text: string, width: number): string[] {
+  const words = text.split(/\s+/);
+  const lines: string[] = [];
+  let current = "";
+  for (const word of words) {
+    const candidate = current ? `${current} ${word}` : word;
+    if (candidate.length > width && current) {
+      lines.push(current);
+      current = word;
+    } else {
+      current = candidate;
+    }
+  }
+  if (current) lines.push(current);
+  return lines;
+}
+
+export type WarningVariant = "danger" | "caution";
+
+/** Bold, high-contrast text-on-solid-color styles — deliberately loud. */
+const WARNING_STYLES: Record<WarningVariant, string> = {
+  danger: "\x1b[1m\x1b[97m\x1b[41m", // bold white on red
+  caution: "\x1b[1m\x1b[30m\x1b[43m", // bold black on yellow
+};
+
+const WARNING_ICON: Record<WarningVariant, string> = {
+  danger: "⚠️ ",
+  caution: "⚠️ ",
+};
+
+/**
+ * A high-contrast, gradient-bordered alert block. Used for things the user
+ * must not miss: mock mode being active, or free-tier throttling kicking in.
+ */
+export function warningBlock(message: string, variant: WarningVariant = "danger"): string {
+  const termWidth = process.stdout.columns ?? 100;
+  const width = Math.max(40, Math.min(96, termWidth - 2));
+  const innerWidth = width - 4;
+
+  const style = WARNING_STYLES[variant];
+  const icon = WARNING_ICON[variant];
+  const wrapped = wrapText(`${icon}${message}`, innerWidth);
+
+  const rule = gradientText("▀".repeat(width));
+  const ruleBottom = gradientText("▄".repeat(width));
+  const body = wrapped.map((line) => `${style} ${padVisible(line, innerWidth)} ${RESET}`);
+
+  return [rule, ...body, ruleBottom].join("\n");
+}
+
 export function banner(): string {
   const art = [
     " █████╗ ███████╗ ██████╗ ██╗███████╗    ██████╗ ██████╗  ██████╗ ██████╗ ███████╗",

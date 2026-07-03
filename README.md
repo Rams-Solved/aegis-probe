@@ -39,18 +39,33 @@ npm link
 aegis-probe --url https://your-endpoint.example.com/v1/chat
 ```
 
+No target yet? Try it with zero setup:
+
+```bash
+aegis-probe --mock
+```
+
 ## Usage
 
 ```
-aegis-probe --url <endpoint> [--key <key>] [--base-url <url>] [--judge-key <key>] [--model <model>] [--output json|table]
+aegis-probe --url <endpoint> [--key <key>] [--model <model>] [--base-url <url>] [--judge-key <key>] [--judge-model <model>] [--output json|table]
+aegis-probe --mock
 ```
 
-There are no defaults for the target — you always pass `--url` explicitly.
+There are no defaults for the target — you always pass `--url` explicitly (or `--mock` to skip a target entirely).
 
-### Target endpoint
+### Target endpoint vs. judge LLM
+
+These two option groups are independent and validated separately:
+
+| | Options | Purpose |
+|---|---|---|
+| **Target** (required) | `--url`, `--key`, `--model`, `--header` | The endpoint being attacked. `--model` here is sent as the `model` field in the request body, if the target needs one. |
+| **Judge** (optional) | `--base-url`, `--judge-key`, `--judge-model` | An LLM used to grade responses instead of the free keyword matcher. |
 
 - `--url <endpoint>` — the chat endpoint to attack. Must accept `POST { messages: [{role, content}, ...] }` and return an OpenAI-compatible body (`{ choices: [{ message: { content } }] }`) or a plain-text/simple-JSON reply.
 - `--key <key>` — optional bearer token sent as `Authorization: Bearer <key>` to the target.
+- `--model <model>` — optional model string sent in the request body to the target (e.g. `gpt-4o-mini`), if it requires one. This is unrelated to judge grading.
 - `--header "Name: Value"` — extra header to send to the target. Repeatable for multiple headers.
 
 ### Grading
@@ -63,10 +78,27 @@ For real grading, point `aegis-probe` at any OpenAI-compatible chat completions 
 aegis-probe --url https://your-endpoint.example.com/v1/chat \
   --base-url https://openrouter.ai/api/v1 \
   --judge-key sk-or-... \
-  --model "openai/gpt-oss-20b:free"
+  --judge-model "openai/gpt-oss-20b:free"
 ```
 
-`--base-url`, `--judge-key`, and `--model` must all be supplied together — passing only some of them is treated as a configuration error rather than silently falling back to keyword grading.
+`--base-url`, `--judge-key`, and `--judge-model` must all be supplied together — passing only some of them is treated as a configuration error rather than silently falling back to keyword grading. Passing `--model` alone (without any judge flags) is fine — it only configures the target and never touches judge validation.
+
+If a judge failure happens mid-run (expired key, 429, dropped connection), that single result falls back to the keyword grader with an explanation noting why — the rest of the run isn't lost.
+
+### Mock mode
+
+`--mock` runs a fully local simulation: no network calls, no keys required, all 25 built-in attacks graded with randomized (clearly labeled `[MOCK]`) results, rendered through the exact same table/JSON report as a real run. Useful for demoing the UI or testing your own tooling around aegis-probe's output without a live target.
+
+```bash
+aegis-probe --mock
+aegis-probe --mock --category role-hijacking --output json
+```
+
+`--mock` bypasses all target/judge validation, including the requirement for `--url`.
+
+### Free-tier rate limiting
+
+If aegis-probe detects a judge configuration that looks like a free-tier or shared endpoint (model name containing `free`, or an OpenRouter base URL), it prints a warning and automatically inserts delays between requests to reduce the odds of tripping upstream 429s. All target and judge requests also time out after 15 seconds, so a dropped connection or hung socket can't stall a run indefinitely — it just surfaces as a failed turn/result and the run continues.
 
 ### Filtering and listing attacks
 
@@ -99,12 +131,12 @@ The process exits with code `1` if any attack broke the target (per the active g
 aegis-probe --url https://your-endpoint.example.com/v1/chat \
   --base-url https://openrouter.ai/api/v1 \
   --judge-key sk-or-v1-... \
-  --model "openai/gpt-oss-20b:free"
+  --judge-model "openai/gpt-oss-20b:free"
 ```
 
-**Note:** OpenRouter's free-tier model lineup rotates — models get added, retired, or occasionally start requiring payment. If a previously-working `--model` value starts failing or unexpectedly billing you, check [openrouter.ai/models](https://openrouter.ai/models) for the current free lineup and swap in a new model string.
+**Note:** OpenRouter's free-tier model lineup rotates — models get added, retired, or occasionally start requiring payment. If a previously-working `--judge-model` value starts failing or unexpectedly billing you, check [openrouter.ai/models](https://openrouter.ai/models) for the current free lineup and swap in a new model string. aegis-probe automatically adds request delays when it detects a free-tier judge, but shared rate limits are still shared — you may occasionally see a 429, which now degrades gracefully to keyword grading for that one result instead of crashing the run.
 
-Any other OpenAI-compatible provider works the same way — OpenAI itself, Groq, Together AI, a local vLLM or Ollama server, etc. Just point `--base-url` at their `/v1`-style base, `--judge-key` at your key for that provider, and `--model` at their model id.
+Any other OpenAI-compatible provider works the same way — OpenAI itself, Groq, Together AI, a local vLLM or Ollama server, etc. Just point `--base-url` at their `/v1`-style base, `--judge-key` at your key for that provider, and `--judge-model` at their model id.
 
 ## Adding your own attacks
 
@@ -115,9 +147,11 @@ Attacks live in `src/attacks/*.ts`, one file per category, each exporting an arr
 ```
 bin/aegis-probe.ts   CLI entry point (commander)
 src/attacks/          Attack definitions, one file per category
-src/probe.ts           Fires attacks, collects responses, maintains multi-turn state
-src/judge.ts            Keyword + LLM-judge grading
+src/probe.ts           Fires attacks, collects responses, maintains multi-turn state, free-tier detection
+src/judge.ts            Keyword + LLM-judge grading, non-fatal fallback on judge failure
+src/mock.ts              Randomized dataset generator for --mock
 src/report.ts             Table/JSON output formatting
+src/ui.ts                  Gradient text, spinner, banner, warning blocks
 ```
 
 ## Responsible use

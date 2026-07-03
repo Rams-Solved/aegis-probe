@@ -1,4 +1,9 @@
 import type { GradedResult, JudgeConfig, ProbeResult, Severity, Verdict } from "./types.js";
+import { sleep } from "./probe.js";
+
+/** Network calls to the judge LLM are aborted after this long so a hung
+ * socket or dropped connection never leaves the spinner stuck forever. */
+const JUDGE_TIMEOUT_MS = 15_000;
 
 /**
  * Phrases that suggest the model capitulated to an adversarial prompt:
@@ -152,6 +157,7 @@ export async function llmGrade(result: ProbeResult, judge: JudgeConfig): Promise
       ],
       temperature: 0,
     }),
+    signal: AbortSignal.timeout(JUDGE_TIMEOUT_MS),
   });
 
   if (!res.ok) {
@@ -177,15 +183,59 @@ export async function llmGrade(result: ProbeResult, judge: JudgeConfig): Promise
   return { ...parsed, method: "llm-judge" };
 }
 
-export async function grade(result: ProbeResult, judge?: JudgeConfig): Promise<GradedResult> {
-  const verdict = judge ? await llmGrade(result, judge) : keywordGrade(result);
-  return { probe: result, verdict };
+function describeJudgeError(err: unknown): string {
+  if (err instanceof Error) {
+    if (err.name === "TimeoutError" || err.name === "AbortError") {
+      return `judge request timed out after ${JUDGE_TIMEOUT_MS / 1000}s (dropped connection or hung socket)`;
+    }
+    return err.message;
+  }
+  return String(err);
 }
 
-export async function gradeAll(results: ProbeResult[], judge?: JudgeConfig): Promise<GradedResult[]> {
+/**
+ * Grades one result. A judge LLM failure (rate limit, expired key, timeout,
+ * dropped connection) is never fatal — it falls back to the free keyword
+ * grader for that result so one bad response doesn't lose an entire run's
+ * worth of already-collected data.
+ */
+export async function grade(result: ProbeResult, judge?: JudgeConfig): Promise<GradedResult> {
+  if (!judge) {
+    return { probe: result, verdict: keywordGrade(result) };
+  }
+  try {
+    const verdict = await llmGrade(result, judge);
+    return { probe: result, verdict };
+  } catch (err) {
+    const fallback = keywordGrade(result);
+    return {
+      probe: result,
+      verdict: {
+        ...fallback,
+        explanation: `Judge LLM unavailable (${describeJudgeError(err)}) — fell back to keyword grading. ${fallback.explanation}`,
+      },
+    };
+  }
+}
+
+export interface GradeAllOptions {
+  /** Delay inserted before each judge call after the first, e.g. for free-tier throttling. */
+  throttleMs?: number;
+  onProgress?: (index: number, total: number) => void;
+}
+
+export async function gradeAll(
+  results: ProbeResult[],
+  judge?: JudgeConfig,
+  options: GradeAllOptions = {},
+): Promise<GradedResult[]> {
   const graded: GradedResult[] = [];
-  for (const result of results) {
-    graded.push(await grade(result, judge));
+  for (let i = 0; i < results.length; i++) {
+    if (i > 0 && judge && options.throttleMs) {
+      await sleep(options.throttleMs);
+    }
+    options.onProgress?.(i, results.length);
+    graded.push(await grade(results[i], judge));
   }
   return graded;
 }

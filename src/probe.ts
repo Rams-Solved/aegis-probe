@@ -1,4 +1,28 @@
-import type { Attack, ChatMessage, ProbeResult, TargetConfig, TurnResult } from "./types.js";
+import type { Attack, ChatMessage, JudgeConfig, ProbeResult, TargetConfig, TurnResult } from "./types.js";
+
+/** Network calls are aborted after this long so a dropped connection or a
+ * hung upstream never leaves the spinner stuck forever. */
+const REQUEST_TIMEOUT_MS = 15_000;
+
+/** Delay inserted between sequential requests when talking to a detected
+ * free-tier judge endpoint, to avoid slamming shared rate limits. */
+export const FREE_TIER_THROTTLE_MS = 2500;
+
+export function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Heuristic: is this judge config likely to be a free-tier / shared-rate-limit
+ * endpoint (e.g. OpenRouter's `:free` models)? Used to opt into extra
+ * inter-request delay so aegis-probe doesn't trip upstream 429s.
+ */
+export function isFreeTierJudge(judge: JudgeConfig | undefined): boolean {
+  if (!judge) return false;
+  const modelLooksFree = /free/i.test(judge.model);
+  const baseUrlIsOpenRouter = /openrouter\.ai/i.test(judge.baseUrl);
+  return modelLooksFree || baseUrlIsOpenRouter;
+}
 
 /**
  * Sends one chat completion request to the target endpoint and returns the
@@ -19,7 +43,11 @@ async function sendMessages(target: TargetConfig, messages: ChatMessage[]): Prom
   const res = await fetch(target.url, {
     method: "POST",
     headers,
-    body: JSON.stringify({ messages }),
+    body: JSON.stringify({
+      messages,
+      ...(target.model ? { model: target.model } : {}),
+    }),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
 
   const text = await res.text();
@@ -73,6 +101,8 @@ export interface RunAttackOptions {
 /**
  * Runs a single attack against the target, maintaining conversation history
  * across all of its turns so multi-turn attacks can build on prior replies.
+ * A per-request timeout (see REQUEST_TIMEOUT_MS) means a hung socket or
+ * dropped connection surfaces as a normal turn error instead of hanging.
  */
 export async function runAttack(
   target: TargetConfig,
@@ -97,7 +127,7 @@ export async function runAttack(
     try {
       response = await sendMessages(target, history);
     } catch (err) {
-      error = err instanceof Error ? err.message : String(err);
+      error = describeNetworkError(err);
     }
     const latencyMs = Date.now() - start;
 
@@ -116,9 +146,21 @@ export async function runAttack(
   return { attack, turns, finalResponse };
 }
 
+function describeNetworkError(err: unknown): string {
+  if (err instanceof Error) {
+    if (err.name === "TimeoutError" || err.name === "AbortError") {
+      return `Request timed out after ${REQUEST_TIMEOUT_MS / 1000}s (dropped connection or hung socket).`;
+    }
+    return err.message;
+  }
+  return String(err);
+}
+
 export interface RunAttacksOptions extends RunAttackOptions {
   onAttackStart?: (attack: Attack, index: number, total: number) => void;
   onAttackComplete?: (result: ProbeResult, index: number, total: number) => void;
+  /** Delay inserted before each attack after the first, e.g. for free-tier throttling. */
+  throttleMs?: number;
 }
 
 export async function runAttacks(
@@ -128,6 +170,9 @@ export async function runAttacks(
 ): Promise<ProbeResult[]> {
   const results: ProbeResult[] = [];
   for (let i = 0; i < attacks.length; i++) {
+    if (i > 0 && options.throttleMs) {
+      await sleep(options.throttleMs);
+    }
     const attack = attacks[i];
     options.onAttackStart?.(attack, i, attacks.length);
     const result = await runAttack(target, attack, options);

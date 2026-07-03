@@ -61,6 +61,8 @@ export interface TargetConfig {
   key?: string;
   /** Extra HTTP headers merged into every request to the target. */
   headers?: Record<string, string>;
+  /** Optional `model` field included in the request body sent to the target. */
+  model?: string;
 }
 
 export interface JudgeConfig {
