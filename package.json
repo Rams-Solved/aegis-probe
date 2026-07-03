@@ -1,0 +1,41 @@
+{
+  "name": "aegis-probe",
+  "version": "0.1.0",
+  "description": "Fire adversarial prompts at any LLM-powered chat endpoint, grade responses, report what broke. Open-source red-teaming CLI.",
+  "keywords": [
+    "llm",
+    "red-team",
+    "security",
+    "prompt-injection",
+    "jailbreak",
+    "ai-safety",
+    "cli"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "aegis-probe": "./bin/aegis-probe.ts"
+  },
+  "files": [
+    "bin",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "start": "tsx bin/aegis-probe.ts",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "commander": "^12.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
