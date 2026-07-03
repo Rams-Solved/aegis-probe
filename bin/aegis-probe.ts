@@ -4,9 +4,16 @@ import { allAttacks, attacksByCategory } from "../src/attacks/index.js";
 import { runAttacks } from "../src/probe.js";
 import { gradeAll } from "../src/judge.js";
 import { formatReport } from "../src/report.js";
+import { banner, gradientText, Spinner, BOLD, DIM, RESET } from "../src/ui.js";
 import type { AttackCategory, JudgeConfig, TargetConfig } from "../src/types.js";
 
 const CATEGORIES = Object.keys(attacksByCategory) as AttackCategory[];
+const CYAN = "\x1b[36m";
+const GRAY = "\x1b[90m";
+
+function section(title: string): string {
+  return `\n${BOLD}${CYAN}${title}${RESET}`;
+}
 
 const program = new Command();
 
@@ -16,9 +23,8 @@ program
     [
       "Fire adversarial prompts at any LLM-powered chat endpoint, grade the responses, and report what broke.",
       "",
-      "aegis-probe sends OpenAI-compatible chat requests (a JSON body with a `messages` array) to --url",
-      "and inspects the replies for signs the target's guardrails failed: instruction overrides, role",
-      "hijacking, system prompt leakage, context/goal hijacking via injected content, and multi-turn attacks.",
+      `${DIM}Sends OpenAI-compatible chat requests (JSON body with a \`messages\` array) to --url and inspects`,
+      `the replies for signs the target's guardrails failed.${RESET}`,
     ].join("\n"),
   )
   .option("--url <endpoint>", "Target chat endpoint to attack (required). Must accept POST { messages: [...] } and return an OpenAI-compatible or plain-text response.")
@@ -36,35 +42,45 @@ program
   .option("--category <category...>", `Only run attacks from these categories: ${CATEGORIES.join(", ")}. Repeatable. Default: all categories.`)
   .option("--output <format>", "Output format: 'json' or 'table'.", "table")
   .option("--list", "List available attacks and exit, without running anything.")
-  .addHelpText(
-    "after",
-    `
-Examples:
-  $ aegis-probe --url https://api.example.com/v1/chat --key sk-... --output table
-      Attack a target endpoint using the free keyword grader.
+  .addHelpText("beforeAll", () => {
+    return `\n${banner()}\n${DIM}  adversarial red-teaming for LLM chat endpoints${RESET}\n`;
+  })
+  .addHelpText("after", () => {
+    const lines: string[] = [];
 
-  $ aegis-probe --url https://api.example.com/v1/chat --key sk-... \\
-      --base-url https://openrouter.ai/api/v1 --judge-key sk-or-... --model "openai/gpt-oss-20b:free"
-      Attack a target and grade responses with an LLM judge via OpenRouter's free tier.
+    lines.push(section("EXAMPLES"));
+    lines.push(`  ${GRAY}# Attack a target using the free keyword grader${RESET}`);
+    lines.push(`  ${gradientText("$ aegis-probe --url https://api.example.com/v1/chat --key sk-...")}\n`);
 
-  $ aegis-probe --url https://api.example.com/v1/chat --category role-hijacking --category multi-turn
-      Only run role-hijacking and multi-turn attacks.
+    lines.push(`  ${GRAY}# Attack and grade with an LLM judge via OpenRouter's free tier${RESET}`);
+    lines.push(
+      `  ${gradientText('$ aegis-probe --url https://api.example.com/v1/chat --key sk-... \\')}\n  ${gradientText('    --base-url https://openrouter.ai/api/v1 --judge-key sk-or-... --model "openai/gpt-oss-20b:free"')}\n`,
+    );
 
-  $ aegis-probe --list
-      Show every built-in attack without contacting any endpoint.
+    lines.push(`  ${GRAY}# Only run specific attack categories${RESET}`);
+    lines.push(`  ${gradientText("$ aegis-probe --url https://api.example.com/v1/chat --category role-hijacking --category multi-turn")}\n`);
 
-Getting an API key / model string for the judge LLM:
-  - OpenRouter (https://openrouter.ai) offers free-tier models you can use as the judge at no cost.
-    Sign up, create a key at https://openrouter.ai/keys, then pass it as --judge-key.
-  - Browse available models (and their exact model strings) at https://openrouter.ai/models — filter
-    for ':free' suffixed models to avoid charges. Pass the exact string, e.g. "openai/gpt-oss-20b:free",
-    as --model, and https://openrouter.ai/api/v1 as --base-url.
-  - Free models on OpenRouter rotate over time and may be retired or start requiring payment — if a
-    run suddenly fails or starts billing you, check https://openrouter.ai/models for the current list.
-  - Any other OpenAI-compatible provider (OpenAI itself, Groq, Together, a local vLLM/Ollama server, etc.)
-    works the same way: --base-url <their API base>, --judge-key <their key>, --model <their model id>.
-`,
-  );
+    lines.push(`  ${GRAY}# List every built-in attack without contacting any endpoint${RESET}`);
+    lines.push(`  ${gradientText("$ aegis-probe --list")}`);
+
+    lines.push(section("GETTING A JUDGE API KEY"));
+    lines.push(
+      [
+        `  ${BOLD}OpenRouter${RESET} ${DIM}(recommended — free-tier models, no cost)${RESET}`,
+        `    1. Sign up at ${CYAN}https://openrouter.ai${RESET} and create a key at ${CYAN}https://openrouter.ai/keys${RESET}`,
+        `    2. Browse ${CYAN}https://openrouter.ai/models${RESET} — filter for ${BOLD}:free${RESET} suffixed models`,
+        `    3. Pass ${BOLD}--base-url https://openrouter.ai/api/v1${RESET}, ${BOLD}--judge-key${RESET} your key, ${BOLD}--model${RESET} e.g. "openai/gpt-oss-20b:free"`,
+        ``,
+        `  ${DIM}Note: free models on OpenRouter rotate over time and may be retired or start requiring payment —${RESET}`,
+        `  ${DIM}check https://openrouter.ai/models if a previously working model starts failing or billing you.${RESET}`,
+        ``,
+        `  ${DIM}Any other OpenAI-compatible provider works too — OpenAI, Groq, Together, a local vLLM/Ollama server —${RESET}`,
+        `  ${DIM}just point --base-url/--judge-key/--model at that provider instead.${RESET}`,
+      ].join("\n"),
+    );
+    lines.push("");
+    return lines.join("\n");
+  });
 
 program.parse(process.argv);
 const opts = program.opts();
@@ -86,11 +102,13 @@ function parseHeaders(headerArgs: string[] | undefined): Record<string, string> 
 
 async function main() {
   if (opts.list) {
+    console.log(`\n${banner()}\n`);
     for (const category of CATEGORIES) {
-      console.log(`\n${category}`);
+      console.log(`${BOLD}${CYAN}${category}${RESET}`);
       for (const attack of attacksByCategory[category]) {
-        console.log(`  ${attack.id}  ${attack.name} (${attack.turns.length} turn${attack.turns.length > 1 ? "s" : ""})`);
+        console.log(`  ${GRAY}${attack.id}${RESET}  ${attack.name} ${DIM}(${attack.turns.length} turn${attack.turns.length > 1 ? "s" : ""})${RESET}`);
       }
+      console.log("");
     }
     return;
   }
@@ -144,23 +162,32 @@ async function main() {
   const isTable = outputFormat === "table";
 
   if (isTable) {
-    console.error(`Running ${attacks.length} attack(s) against ${target.url}...`);
-    if (judge) {
-      console.error(`Grading with LLM judge: ${judge.model} @ ${judge.baseUrl}`);
-    } else {
-      console.error("Grading with free keyword matcher (pass --base-url/--judge-key/--model for LLM grading).");
-    }
+    console.error(`\n${banner()}\n`);
+    console.error(`${DIM}target ${RESET}${target.url}`);
+    console.error(
+      judge
+        ? `${DIM}judge  ${RESET}${judge.model} ${GRAY}@ ${judge.baseUrl}${RESET}`
+        : `${DIM}judge  ${RESET}free keyword matcher ${GRAY}(pass --base-url/--judge-key/--model for LLM grading)${RESET}`,
+    );
+    console.error("");
   }
 
+  const spinner = new Spinner();
+  if (isTable) spinner.start();
+
   const results = await runAttacks(target, attacks, {
-    onAttackComplete: (result, index, total) => {
-      if (isTable) {
-        console.error(`  [${index + 1}/${total}] ${result.attack.id} ${result.attack.name} done`);
-      }
+    onAttackStart: (attack, index, total) => {
+      if (isTable) spinner.setSuffix(`[${index + 1}/${total}] ${attack.id} · ${attack.category}`);
     },
   });
 
+  if (isTable) {
+    spinner.setSuffix("grading responses");
+  }
   const graded = await gradeAll(results, judge);
+
+  spinner.stop();
+
   console.log(formatReport(graded, outputFormat));
 
   const anyBroke = graded.some((g) => g.verdict.broke);
