@@ -54,10 +54,15 @@ aegis-probe
 ```
 
 ```
-aegis ❯ help     # print the full help layout
-aegis ❯ mock     # run the local --mock simulation inline, then return to the prompt
-aegis ❯ exit     # (or quit, or Ctrl+C) leave cleanly
+aegis [target: none] ❯ help                                # print the full help layout
+aegis [target: none] ❯ target https://api.example.com/chat  # set a target — shown in the prompt
+aegis [target: https://api.example.com/chat] ❯ mock         # run the local --mock simulation inline
+aegis [target: https://api.example.com/chat] ❯ spill        # raw, untruncated dump of the last results
+aegis [target: https://api.example.com/chat] ❯ target none  # clear the target back to 'none'
+aegis [target: none] ❯ exit                                 # (or quit, or Ctrl+C) leave cleanly
 ```
+
+The results table wraps long attack/note text instead of truncating it, and re-renders automatically if you resize the terminal. If the wrapped table still isn't what you want to read, `spill` prints every result as plain, borderless, un-wrapped text.
 
 Any invocation with at least one argument (`--mock`, `--list`, `--url ...`, `--help`, etc.) skips the shell entirely and runs as a normal one-shot command.
 

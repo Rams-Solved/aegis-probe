@@ -28,6 +28,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "cli-table3": "^0.6.5",
     "commander": "^12.1.0"
   },
   "devDependencies": {

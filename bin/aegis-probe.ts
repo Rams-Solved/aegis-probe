@@ -4,14 +4,19 @@ import { createInterface } from "node:readline/promises";
 import { allAttacks, attacksByCategory } from "../src/attacks/index.js";
 import { FREE_TIER_THROTTLE_MS, isFreeTierJudge, runAttacks, sleep } from "../src/probe.js";
 import { gradeAll } from "../src/judge.js";
-import { formatReport } from "../src/report.js";
+import { formatReport, formatSpill } from "../src/report.js";
 import { generateMockResults } from "../src/mock.js";
 import { banner, gradientText, Spinner, warningBlock, BOLD, DIM, RESET } from "../src/ui.js";
-import type { AttackCategory, JudgeConfig, TargetConfig } from "../src/types.js";
+import type { AttackCategory, GradedResult, JudgeConfig, TargetConfig } from "../src/types.js";
 
 const CATEGORIES = Object.keys(attacksByCategory) as AttackCategory[];
 const CYAN = "\x1b[36m";
 const GRAY = "\x1b[90m";
+
+/** The most recently rendered result set — backs the REPL's `spill` command
+ * and lets a terminal resize re-render at the new width instead of just
+ * leaving the stale layout on screen. */
+let lastResults: GradedResult[] | undefined;
 
 function section(title: string): string {
   return `\n${BOLD}${CYAN}${title}${RESET}`;
@@ -234,6 +239,7 @@ async function main() {
 
   spinner.stop();
 
+  lastResults = graded;
   console.log(formatReport(graded, outputFormat));
 
   const anyBroke = graded.some((g) => g.verdict.broke);
@@ -270,14 +276,20 @@ async function runMock(
   spinner.stop();
 
   const graded = generateMockResults(attacks);
+  lastResults = graded;
   console.log(formatReport(graded, outputFormat));
 
   const anyBroke = graded.some((g) => g.verdict.broke);
   process.exitCode = anyBroke ? 1 : 0;
 }
 
-/** Exact Aegis palette prompt, per spec — purple "aegis" label, blue "❯" caret. */
-const REPL_PROMPT = "\x1b[38;5;141maegis \x1b[38;5;39m❯ \x1b[0m";
+/**
+ * Aegis palette prompt: purple "aegis" label, a target indicator, blue "❯"
+ * caret. Rebuilt (via rl.setPrompt) every time the target changes.
+ */
+function buildReplPrompt(target: string | undefined): string {
+  return `\x1b[38;5;141maegis \x1b[38;5;244m[target: ${target ?? "none"}]\x1b[38;5;39m ❯ \x1b[0m`;
+}
 
 /**
  * A persistent interactive shell for aegis-probe, entered when the CLI is
@@ -289,18 +301,34 @@ async function runRepl(): Promise<void> {
   process.stdout.write("\x1b[2J\x1b[3J\x1b[H"); // clear screen + scrollback, cursor home
   console.log(`\n${banner()}\n${DIM}  adversarial red-teaming for LLM chat endpoints${RESET}\n`);
   console.log(
-    `${DIM}Type ${RESET}${BOLD}help${RESET}${DIM} for commands, ${RESET}${BOLD}mock${RESET}${DIM} to run a local demo, or ${RESET}${BOLD}exit${RESET}${DIM} to quit.${RESET}\n`,
+    `${DIM}Type ${RESET}${BOLD}help${RESET}${DIM}, ${RESET}${BOLD}mock${RESET}${DIM}, ${RESET}${BOLD}target <url>${RESET}${DIM}, ${RESET}${BOLD}spill${RESET}${DIM}, or ${RESET}${BOLD}exit${RESET}${DIM}.${RESET}\n`,
   );
+
+  let currentTarget: string | undefined;
 
   const rl = createInterface({
     input: process.stdin,
     output: process.stdout,
-    prompt: REPL_PROMPT,
+    prompt: buildReplPrompt(currentTarget),
   });
 
   let closed = false;
+  let resizeTimer: NodeJS.Timeout | undefined;
+
+  const onResize = () => {
+    if (!lastResults) return;
+    if (resizeTimer) clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      console.log(`\n${formatReport(lastResults!, "table")}\n`);
+      if (!closed) rl.prompt(true);
+    }, 100);
+  };
+  process.stdout.on("resize", onResize);
+
   rl.on("close", () => {
     closed = true;
+    if (resizeTimer) clearTimeout(resizeTimer);
+    process.stdout.removeListener("resize", onResize);
   });
   // Let readline own Ctrl+C: without a listener here, a bare SIGINT during
   // interactive input can surface as an abrupt/uncaught interrupt instead of
@@ -317,12 +345,15 @@ async function runRepl(): Promise<void> {
     const line = rawLine.trim();
 
     if (line) {
-      const [cmd] = line.split(/\s+/);
-      switch (cmd.toLowerCase()) {
+      const parts = line.split(/\s+/);
+      const cmd = parts[0].toLowerCase();
+      const rest = parts.slice(1).join(" ").trim();
+
+      switch (cmd) {
         case "mock": {
           console.log("");
           await runMock(allAttacks, "table", true);
-          console.log("");
+          console.log(`${DIM}↳ type ${RESET}${BOLD}spill${RESET}${DIM} for raw output${RESET}\n`);
           break;
         }
         case "help": {
@@ -330,6 +361,29 @@ async function runRepl(): Promise<void> {
           // QUICK START, EXAMPLES, judge setup — render exactly as they do
           // for `--help`, not just the bare usage/options block.
           program.outputHelp();
+          break;
+        }
+        case "spill": {
+          if (!lastResults) {
+            console.log(`${DIM}No results yet — run ${RESET}${BOLD}mock${RESET}${DIM} first.${RESET}\n`);
+          } else {
+            console.log(formatSpill(lastResults));
+            console.log("");
+          }
+          break;
+        }
+        case "target": {
+          if (!rest) {
+            console.log(`${DIM}target: ${RESET}${currentTarget ?? "none"}\n`);
+          } else if (rest.toLowerCase() === "none" || rest.toLowerCase() === "clear") {
+            currentTarget = undefined;
+            rl.setPrompt(buildReplPrompt(currentTarget));
+            console.log(`${DIM}target cleared.${RESET}\n`);
+          } else {
+            currentTarget = rest;
+            rl.setPrompt(buildReplPrompt(currentTarget));
+            console.log(`${DIM}target set to ${RESET}${BOLD}${currentTarget}${RESET}\n`);
+          }
           break;
         }
         case "exit":

@@ -1,3 +1,4 @@
+import Table from "cli-table3";
 import type { GradedResult, Severity } from "./types.js";
 import { BOLD, DIM, RESET } from "./ui.js";
 
@@ -9,20 +10,18 @@ const SEVERITY_ORDER: Record<Severity, number> = {
   critical: 4,
 };
 
-/** Badge background/foreground per severity — solid pills, easy to scan at a glance. */
+/** Solid color "pill" badges. cli-table3 measures visible width itself
+ * (via string-width, ANSI-aware), so unlike the old hand-rolled table we
+ * don't need to separately track each badge's rendered width — that
+ * duplicate bookkeeping was the source of a real alignment bug (the
+ * critical badge's tracked width was off by one from its true rendered
+ * width, 11 vs. the actual 10). */
 const SEVERITY_BADGE: Record<Severity, string> = {
   none: `\x1b[100m\x1b[97m NONE \x1b[0m`,
   low: `\x1b[46m\x1b[30m LOW \x1b[0m`,
   medium: `\x1b[43m\x1b[30m MEDIUM \x1b[0m`,
   high: `\x1b[41m\x1b[97m HIGH \x1b[0m`,
   critical: `\x1b[48;5;53m\x1b[97m\x1b[1m CRITICAL \x1b[0m`,
-};
-const SEVERITY_BADGE_WIDTH: Record<Severity, number> = {
-  none: 6,
-  low: 5,
-  medium: 8,
-  high: 6,
-  critical: 11,
 };
 
 const GREEN = "\x1b[32m";
@@ -72,108 +71,130 @@ export function formatJson(results: GradedResult[]): string {
   return JSON.stringify(payload, null, 2);
 }
 
-function truncate(text: string, max: number): string {
-  const oneLine = text.replace(/\s+/g, " ").trim();
-  if (oneLine.length <= max) return oneLine;
-  return oneLine.slice(0, Math.max(0, max - 1)) + "…";
+function sortWorstFirst(results: GradedResult[]): GradedResult[] {
+  return [...results].sort((a, b) => SEVERITY_ORDER[b.verdict.severity] - SEVERITY_ORDER[a.verdict.severity]);
 }
 
-function pad(text: string, width: number): string {
-  if (text.length >= width) return text.slice(0, width);
-  return text + " ".repeat(width - text.length);
+interface ColumnWidths {
+  id: number;
+  severity: number;
+  attack: number;
+  notes: number;
 }
 
-function padBadge(badge: string, visibleWidth: number, targetWidth: number): string {
-  const gap = Math.max(0, targetWidth - visibleWidth);
-  return badge + " ".repeat(gap);
+const NUM_COLUMNS = 4;
+const BORDER_OVERHEAD = NUM_COLUMNS + 1; // one vertical border char per column edge
+const MIN_ATTACK_WIDTH = 18;
+const MIN_NOTES_WIDTH = 22;
+
+/**
+ * Column widths (each including cli-table3's own cell padding) computed
+ * fresh from the current terminal width every time — so a resize is just a
+ * re-render with new inputs, not a separate code path. ID and SEVERITY are
+ * fixed; the remaining space is split between ATTACK and NOTES, favoring
+ * NOTES, with floors so neither ever degenerates to an unreadable sliver.
+ */
+function computeColumnWidths(termWidth: number): ColumnWidths {
+  const id = 10;
+  const severity = 13; // fits the widest badge (" CRITICAL ", 10 visible chars) plus padding
+  const remainder = termWidth - id - severity - BORDER_OVERHEAD;
+  const attack = Math.max(MIN_ATTACK_WIDTH, Math.floor(remainder * 0.4));
+  const notes = Math.max(MIN_NOTES_WIDTH, remainder - attack);
+  return { id, severity, attack, notes };
 }
 
-const H = "─";
-const V = "│";
-const TL = "╭";
-const TR = "╮";
-const BL = "╰";
-const BR = "╯";
-const ML = "├";
-const MR = "┤";
-const MT = "┬";
-const MB = "┴";
-const MX = "┼";
-
-function box(cols: number[]): { top: string; mid: string; bottom: string } {
-  const seg = (l: string, m: string, r: string) => l + cols.map((w) => H.repeat(w + 2)).join(m) + r;
-  return {
-    top: seg(TL, MT, TR),
-    mid: seg(ML, MX, MR),
-    bottom: seg(BL, MB, BR),
-  };
+function buildTable(widths: ColumnWidths): InstanceType<typeof Table> {
+  return new Table({
+    head: [`${BOLD}ID${RESET}`, `${BOLD}SEVERITY${RESET}`, `${BOLD}ATTACK${RESET}`, `${BOLD}NOTES${RESET}`],
+    colWidths: [widths.id, widths.severity, widths.attack, widths.notes],
+    wordWrap: true,
+    wrapOnWordBoundary: true,
+    chars: {
+      "top-left": "╭",
+      "top-right": "╮",
+      "bottom-left": "╰",
+      "bottom-right": "╯",
+    },
+    style: { head: [], border: ["grey"] },
+  });
 }
 
-/** Joins already-padded (plain-width) cells with dim column separators. */
-function dataRow(cells: string[]): string {
-  const sep = `${DIM}${V}${RESET}`;
-  return `${sep} ${cells.join(` ${sep} `)} ${sep}`;
+/**
+ * Renders one result row's cells. Isolated so a single malformed result
+ * (missing/unexpected fields, an unrecognized severity value, etc.) can
+ * never take down the whole table — the caller wraps this per-row.
+ */
+function buildRowCells(r: GradedResult): [string, string, string, string] {
+  const sev = r.verdict.severity;
+  const badge = SEVERITY_BADGE[sev];
+  if (!badge) {
+    throw new Error(`unrecognized severity: ${String(sev)}`);
+  }
+  const brokeMark = r.verdict.broke ? "⚠ " : "";
+  const idCell = `${CYAN}${r.probe.attack.id}${RESET}`;
+  const nameCell = r.probe.attack.name;
+  const noteCell = `${brokeMark}${r.verdict.explanation}`;
+  return [idCell, badge, nameCell, noteCell];
+}
+
+function renderTable(results: GradedResult[]): string {
+  const sorted = sortWorstFirst(results);
+  const termWidth = process.stdout.columns ?? 100;
+  const widths = computeColumnWidths(termWidth);
+  const table = buildTable(widths);
+
+  for (const r of sorted) {
+    try {
+      table.push(buildRowCells(r));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      table.push([
+        r.probe?.attack?.id ?? "[render error]",
+        "[render error]",
+        r.probe?.attack?.name ?? "[render error]",
+        `[render error] ${message}`,
+      ]);
+    }
+  }
+
+  const summary = summarize(results);
+  return [table.toString(), "", summaryPanel(summary)].join("\n");
+}
+
+/**
+ * Plain, borderless dump of every result with the full untruncated
+ * explanation — the `spill` escape hatch for when the boxed table's
+ * wrapping still isn't what you want to read.
+ */
+export function formatSpill(results: GradedResult[]): string {
+  const sorted = sortWorstFirst(results);
+  const blocks = sorted.map((r) => {
+    const sev = r.verdict.severity;
+    const badge = SEVERITY_BADGE[sev] ?? sev.toUpperCase();
+    const brokeMark = r.verdict.broke ? " ⚠ BROKE" : "";
+    return [
+      `${BOLD}${r.probe.attack.id}${RESET}  ${badge}${brokeMark}`,
+      `${r.probe.attack.name}`,
+      `${DIM}${r.verdict.explanation}${RESET}`,
+    ].join("\n");
+  });
+  return blocks.join(`\n\n${DIM}${"─".repeat(40)}${RESET}\n\n`);
 }
 
 export function formatTable(results: GradedResult[]): string {
-  const sorted = [...results].sort(
-    (a, b) => SEVERITY_ORDER[b.verdict.severity] - SEVERITY_ORDER[a.verdict.severity],
-  );
-
-  const termWidth = process.stdout.columns ?? 100;
-
-  const idW = 8;
-  const sevW = 11; // widest badge, "CRITICAL"
-  const nameW = 28;
-  const fixed = idW + sevW + nameW;
-  const noteW = Math.max(24, Math.min(60, termWidth - fixed - 13));
-
-  const widths = [idW, sevW, nameW, noteW];
-  const { top, mid, bottom } = box(widths);
-
-  const lines: string[] = [];
-  lines.push(gradientRule(top));
-  lines.push(
-    dataRow([
-      `${BOLD}${pad("ID", idW)}${RESET}`,
-      `${BOLD}${pad("SEVERITY", sevW)}${RESET}`,
-      `${BOLD}${pad("ATTACK", nameW)}${RESET}`,
-      `${BOLD}${pad("NOTES", noteW)}${RESET}`,
-    ]),
-  );
-  lines.push(`${DIM}${mid}${RESET}`);
-
-  for (const r of sorted) {
-    const sev = r.verdict.severity;
-    const badge = padBadge(SEVERITY_BADGE[sev], SEVERITY_BADGE_WIDTH[sev], sevW);
-    const brokeMark = r.verdict.broke ? "⚠ " : "";
-    const note = pad(brokeMark + truncate(r.verdict.explanation, noteW - brokeMark.length), noteW);
-    lines.push(
-      dataRow([
-        `${CYAN}${pad(r.probe.attack.id, idW)}${RESET}`,
-        badge,
-        pad(truncate(r.probe.attack.name, nameW), nameW),
-        note,
-      ]),
-    );
+  try {
+    return renderTable(results);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return [
+      `${RED}[table render failed (${message}) — showing raw dump instead]${RESET}`,
+      "",
+      formatSpill(results),
+    ].join("\n");
   }
-  lines.push(`${DIM}${bottom}${RESET}`);
-
-  const summary = summarize(results);
-  lines.push("");
-  lines.push(summaryPanel(summary));
-
-  return lines.join("\n");
-}
-
-function gradientRule(line: string): string {
-  // Subtle: keep structural lines dim rather than gradient, so the gradient
-  // stays reserved for the spinner/banner and doesn't fight the data.
-  return `${DIM}${line}${RESET}`;
 }
 
 function summaryPanel(summary: ReportSummary): string {
-  const brokeColor = summary.broken > 0 ? RED : GREEN;
   const verdictLine =
     summary.broken > 0
       ? `${RED}${BOLD}⚠ ${summary.broken}/${summary.total} attacks broke the target${RESET}`
