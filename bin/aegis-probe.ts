@@ -7,7 +7,7 @@ import { gradeAll } from "../src/judge.js";
 import { formatReport, formatSpill } from "../src/report.js";
 import { generateMockResults } from "../src/mock.js";
 import { banner, gradientText, Spinner, warningBlock, BOLD, DIM, RESET } from "../src/ui.js";
-import type { AttackCategory, GradedResult, JudgeConfig, TargetConfig } from "../src/types.js";
+import type { Attack, AttackCategory, GradedResult, JudgeConfig, TargetConfig } from "../src/types.js";
 
 const CATEGORIES = Object.keys(attacksByCategory) as AttackCategory[];
 const CYAN = "\x1b[36m";
@@ -291,6 +291,70 @@ function buildReplPrompt(target: string | undefined): string {
   return `\x1b[38;5;141maegis \x1b[38;5;244m[target: ${target ?? "none"}]\x1b[38;5;39m ❯ \x1b[0m`;
 }
 
+/** Dim follow-up hints shown after any REPL table render, pointing at the
+ * next useful command given what's actually in the result set. */
+function printPostTableHints(results: GradedResult[]): void {
+  console.log(`${DIM}↳ type ${RESET}${BOLD}spill${RESET}${DIM} for raw output${RESET}`);
+  if (results.some((r) => r.verdict.errored)) {
+    console.log(`${DIM}↳ type ${RESET}${BOLD}target errored${RESET}${DIM} to retry errored attacks${RESET}`);
+  }
+  console.log("");
+}
+
+/**
+ * Re-runs ONLY the currently errored attacks (network error, timeout,
+ * empty/malformed response — see judge.ts) against `currentTarget`, merging
+ * fresh results back into `lastResults` by attack id so everything else in
+ * the table is left untouched. Reuses runAttacks/gradeAll exactly as the
+ * one-shot CLI path does — no attack-execution or grading logic here, just
+ * orchestration. Grades with the free keyword matcher: the REPL has no
+ * --key/--judge-* equivalent yet, so a retargeted run is unauthenticated
+ * and ungraded-by-LLM by design, same as any other REPL-driven run today.
+ */
+async function retargetErrored(currentTarget: string | undefined): Promise<void> {
+  const erroredResults = lastResults?.filter((r) => r.verdict.errored) ?? [];
+
+  if (erroredResults.length === 0) {
+    console.log(`${DIM}no errored attacks to retarget${RESET}\n`);
+    return;
+  }
+
+  if (!currentTarget) {
+    console.log(`${DIM}No target configured — use ${RESET}${BOLD}target <url>${RESET}${DIM} first.${RESET}\n`);
+    return;
+  }
+
+  const attacksToRetry: Attack[] = erroredResults.map((r) => r.probe.attack);
+  const target: TargetConfig = { url: currentTarget, headers: {} };
+
+  console.log(
+    `${DIM}Re-running ${RESET}${BOLD}${attacksToRetry.length}${RESET}${DIM} errored attack(s) against ${RESET}${currentTarget}${DIM} (keyword grading)...${RESET}\n`,
+  );
+
+  const spinner = new Spinner();
+  spinner.start();
+
+  const results = await runAttacks(target, attacksToRetry, {
+    onAttackStart: (attack, index, total) => {
+      spinner.setSuffix(`[${index + 1}/${total}] ${attack.id} · ${attack.category}`);
+    },
+  });
+
+  const graded = await gradeAll(results, undefined, {
+    onProgress: (index, total) => {
+      spinner.setSuffix(`grading [${index + 1}/${total}]`);
+    },
+  });
+
+  spinner.stop();
+
+  const gradedById = new Map(graded.map((g) => [g.probe.attack.id, g]));
+  lastResults = (lastResults ?? []).map((r) => gradedById.get(r.probe.attack.id) ?? r);
+
+  console.log(formatReport(lastResults, "table"));
+  printPostTableHints(lastResults);
+}
+
 /**
  * A persistent interactive shell for aegis-probe, entered when the CLI is
  * launched with zero arguments. Deliberately minimal: `mock` runs the same
@@ -353,7 +417,7 @@ async function runRepl(): Promise<void> {
         case "mock": {
           console.log("");
           await runMock(allAttacks, "table", true);
-          console.log(`${DIM}↳ type ${RESET}${BOLD}spill${RESET}${DIM} for raw output${RESET}\n`);
+          if (lastResults) printPostTableHints(lastResults);
           break;
         }
         case "help": {
@@ -379,6 +443,8 @@ async function runRepl(): Promise<void> {
             currentTarget = undefined;
             rl.setPrompt(buildReplPrompt(currentTarget));
             console.log(`${DIM}target cleared.${RESET}\n`);
+          } else if (rest.toLowerCase() === "errored" || rest.toLowerCase() === "failed") {
+            await retargetErrored(currentTarget);
           } else {
             currentTarget = rest;
             rl.setPrompt(buildReplPrompt(currentTarget));

@@ -42,14 +42,35 @@ export interface ProbeResult {
   finalResponse: string;
 }
 
-export type Severity = "none" | "low" | "medium" | "high" | "critical";
+/** "pass" means the target defended successfully — no capitulation detected. */
+export type Severity = "pass" | "low" | "medium" | "high" | "critical";
 
-export interface Verdict {
+export type GradingMethod = "keyword" | "llm-judge";
+
+/**
+ * An attack resolves to EITHER a severity verdict OR an errored state — never
+ * both, and never a fabricated severity standing in for "we don't actually
+ * know" (network error, rate-limit, timeout, malformed response, empty
+ * output). `severity`/`broke` are still present (as `null`/`false`) on the
+ * errored variant so callers that only need `.broke` don't have to narrow.
+ */
+export interface SeverityVerdict {
+  errored: false;
   severity: Severity;
   broke: boolean;
   explanation: string;
-  method: "keyword" | "llm-judge";
+  method: GradingMethod;
 }
+
+export interface ErroredVerdict {
+  errored: true;
+  severity: null;
+  broke: false;
+  explanation: string;
+  method: GradingMethod;
+}
+
+export type Verdict = SeverityVerdict | ErroredVerdict;
 
 export interface GradedResult {
   probe: ProbeResult;

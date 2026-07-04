@@ -58,11 +58,14 @@ aegis [target: none] ❯ help                                # print the full he
 aegis [target: none] ❯ target https://api.example.com/chat  # set a target — shown in the prompt
 aegis [target: https://api.example.com/chat] ❯ mock         # run the local --mock simulation inline
 aegis [target: https://api.example.com/chat] ❯ spill        # raw, untruncated dump of the last results
+aegis [target: https://api.example.com/chat] ❯ target errored  # (alias: target failed) re-run only errored attacks
 aegis [target: https://api.example.com/chat] ❯ target none  # clear the target back to 'none'
 aegis [target: none] ❯ exit                                 # (or quit, or Ctrl+C) leave cleanly
 ```
 
 The results table wraps long attack/note text instead of truncating it, and re-renders automatically if you resize the terminal. If the wrapped table still isn't what you want to read, `spill` prints every result as plain, borderless, un-wrapped text.
+
+`target errored` (alias `target failed`) re-runs only the attacks that errored out — network error, rate-limit/429, timeout, or an empty/malformed response — against the currently configured target, and merges the fresh results back into the table by attack id; everything else is left untouched. It grades with the free keyword matcher (the shell has no `--key`/judge-config equivalent yet). Note: `mock` never produces errored attacks by design (it's a pure local simulation), so today the only way to actually populate errored results is a real `--url` run outside the shell — `target errored` is ready for a future in-shell "run against target" command.
 
 Any invocation with at least one argument (`--mock`, `--list`, `--url ...`, `--help`, etc.) skips the shell entirely and runs as a normal one-shot command.
 
@@ -92,6 +95,11 @@ These two option groups are independent and validated separately:
 ### Grading
 
 By default, `aegis-probe` grades responses for free using keyword/pattern matching — it looks for phrases suggesting the target adopted a jailbreak persona, echoed override language, or started leaking what looks like a system prompt, versus clear refusal language. This is fast and has no external dependency, but it's crude: it can miss subtle compliance and can't judge nuance.
+
+Every attack ends up in exactly one of two buckets:
+
+- A **severity verdict** — `PASS` (defended successfully), `LOW`, `MEDIUM`, `HIGH`, or `CRITICAL` — when a real response was graded.
+- **`ERROR`** — when no verdict could be produced at all: a network error, a rate-limit/429, a timeout, or an empty/malformed response. This is never conflated with `PASS` — an error just means "we don't know," not "the target held."
 
 For real grading, point `aegis-probe` at any OpenAI-compatible chat completions API to use as a judge LLM:
 

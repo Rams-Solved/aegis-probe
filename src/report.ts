@@ -3,7 +3,7 @@ import type { GradedResult, Severity } from "./types.js";
 import { BOLD, DIM, RESET } from "./ui.js";
 
 const SEVERITY_ORDER: Record<Severity, number> = {
-  none: 0,
+  pass: 0,
   low: 1,
   medium: 2,
   high: 3,
@@ -17,34 +17,47 @@ const SEVERITY_ORDER: Record<Severity, number> = {
  * critical badge's tracked width was off by one from its true rendered
  * width, 11 vs. the actual 10). */
 const SEVERITY_BADGE: Record<Severity, string> = {
-  none: `\x1b[100m\x1b[97m NONE \x1b[0m`,
+  pass: `\x1b[100m\x1b[97m PASS \x1b[0m`,
   low: `\x1b[46m\x1b[30m LOW \x1b[0m`,
   medium: `\x1b[43m\x1b[30m MEDIUM \x1b[0m`,
   high: `\x1b[41m\x1b[97m HIGH \x1b[0m`,
   critical: `\x1b[48;5;53m\x1b[97m\x1b[1m CRITICAL \x1b[0m`,
 };
 
+/** Distinct from every severity badge on purpose: an errored attack never
+ * produced a verdict at all, so it must never be visually confused with a
+ * (fabricated) severity — bright orange, not any of the severity hues. */
+const ERROR_BADGE = `\x1b[48;5;208m\x1b[97m\x1b[1m ERROR \x1b[0m`;
+
 const GREEN = "\x1b[32m";
 const RED = "\x1b[31m";
+const ORANGE = "\x1b[38;5;208m";
 const CYAN = "\x1b[36m";
 
 export interface ReportSummary {
   total: number;
   broken: number;
+  errored: number;
   bySeverity: Record<Severity, number>;
   gradingMethod: "keyword" | "llm-judge";
 }
 
 export function summarize(results: GradedResult[]): ReportSummary {
-  const bySeverity: Record<Severity, number> = { none: 0, low: 0, medium: 0, high: 0, critical: 0 };
+  const bySeverity: Record<Severity, number> = { critical: 0, high: 0, medium: 0, low: 0, pass: 0 };
   let broken = 0;
+  let errored = 0;
   for (const r of results) {
+    if (r.verdict.errored) {
+      errored++;
+      continue;
+    }
     bySeverity[r.verdict.severity]++;
     if (r.verdict.broke) broken++;
   }
   return {
     total: results.length,
     broken,
+    errored,
     bySeverity,
     gradingMethod: results[0]?.verdict.method ?? "keyword",
   };
@@ -71,8 +84,15 @@ export function formatJson(results: GradedResult[]): string {
   return JSON.stringify(payload, null, 2);
 }
 
+/** Errored rows sort above every severity (including critical) — an attack
+ * with no verdict demands attention/re-running, not a spot in the middle
+ * of the pack. */
+function rank(r: GradedResult): number {
+  return r.verdict.errored ? Infinity : SEVERITY_ORDER[r.verdict.severity];
+}
+
 function sortWorstFirst(results: GradedResult[]): GradedResult[] {
-  return [...results].sort((a, b) => SEVERITY_ORDER[b.verdict.severity] - SEVERITY_ORDER[a.verdict.severity]);
+  return [...results].sort((a, b) => rank(b) - rank(a));
 }
 
 interface ColumnWidths {
@@ -125,14 +145,19 @@ function buildTable(widths: ColumnWidths): InstanceType<typeof Table> {
  * never take down the whole table — the caller wraps this per-row.
  */
 function buildRowCells(r: GradedResult): [string, string, string, string] {
+  const idCell = `${CYAN}${r.probe.attack.id}${RESET}`;
+  const nameCell = r.probe.attack.name;
+
+  if (r.verdict.errored) {
+    return [idCell, ERROR_BADGE, nameCell, r.verdict.explanation];
+  }
+
   const sev = r.verdict.severity;
   const badge = SEVERITY_BADGE[sev];
   if (!badge) {
     throw new Error(`unrecognized severity: ${String(sev)}`);
   }
   const brokeMark = r.verdict.broke ? "⚠ " : "";
-  const idCell = `${CYAN}${r.probe.attack.id}${RESET}`;
-  const nameCell = r.probe.attack.name;
   const noteCell = `${brokeMark}${r.verdict.explanation}`;
   return [idCell, badge, nameCell, noteCell];
 }
@@ -169,9 +194,8 @@ function renderTable(results: GradedResult[]): string {
 export function formatSpill(results: GradedResult[]): string {
   const sorted = sortWorstFirst(results);
   const blocks = sorted.map((r) => {
-    const sev = r.verdict.severity;
-    const badge = SEVERITY_BADGE[sev] ?? sev.toUpperCase();
-    const brokeMark = r.verdict.broke ? " ⚠ BROKE" : "";
+    const badge = r.verdict.errored ? ERROR_BADGE : (SEVERITY_BADGE[r.verdict.severity] ?? r.verdict.severity.toUpperCase());
+    const brokeMark = !r.verdict.errored && r.verdict.broke ? " ⚠ BROKE" : "";
     return [
       `${BOLD}${r.probe.attack.id}${RESET}  ${badge}${brokeMark}`,
       `${r.probe.attack.name}`,
@@ -195,21 +219,28 @@ export function formatTable(results: GradedResult[]): string {
 }
 
 function summaryPanel(summary: ReportSummary): string {
-  const verdictLine =
-    summary.broken > 0
-      ? `${RED}${BOLD}⚠ ${summary.broken}/${summary.total} attacks broke the target${RESET}`
-      : `${GREEN}${BOLD}✓ Target held against all ${summary.total} attacks${RESET}`;
+  let verdictLine: string;
+  if (summary.broken > 0) {
+    verdictLine = `${RED}${BOLD}⚠ ${summary.broken}/${summary.total} attacks broke the target${RESET}`;
+  } else if (summary.errored > 0) {
+    const graded = summary.total - summary.errored;
+    verdictLine = `${ORANGE}${BOLD}⚠ ${summary.errored}/${summary.total} attacks errored (no verdict) — ${graded} held${RESET}`;
+  } else {
+    verdictLine = `${GREEN}${BOLD}✓ Target held against all ${summary.total} attacks${RESET}`;
+  }
 
-  const sevSummary = (["critical", "high", "medium", "low", "none"] as Severity[])
+  const sevSummary = (["critical", "high", "medium", "low", "pass"] as Severity[])
     .filter((s) => summary.bySeverity[s] > 0)
     .map((s) => `${SEVERITY_BADGE[s]} ${DIM}×${summary.bySeverity[s]}${RESET}`)
     .join("   ");
+  const errorSummary = summary.errored > 0 ? `${ERROR_BADGE} ${DIM}×${summary.errored}${RESET}` : "";
+  const chips = [errorSummary, sevSummary].filter(Boolean).join("   ");
 
   const lines = [
     verdictLine,
     `${DIM}graded with ${summary.gradingMethod === "llm-judge" ? "LLM judge" : "free keyword matcher"} · ${summary.total} attack${summary.total === 1 ? "" : "s"} total${RESET}`,
   ];
-  if (sevSummary) lines.push(sevSummary);
+  if (chips) lines.push(chips);
 
   return lines.join("\n");
 }

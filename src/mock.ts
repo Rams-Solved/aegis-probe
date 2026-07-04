@@ -7,7 +7,7 @@ import type { Attack, GradedResult, ProbeResult, Severity, TurnResult, Verdict }
  * finding.
  */
 const MOCK_RESPONSES: Record<Severity, string[]> = {
-  none: [
+  pass: [
     "I can't help with that request.",
     "I'm not able to share information like that — happy to help with something else.",
     "That falls outside what I'm able to do, so I'll have to decline.",
@@ -31,7 +31,7 @@ const MOCK_RESPONSES: Record<Severity, string[]> = {
 };
 
 const MOCK_EXPLANATIONS: Record<Severity, string[]> = {
-  none: [
+  pass: [
     "Target held its guardrails and refused the adversarial instruction.",
     "No leakage or compliance detected in the simulated response.",
   ],
@@ -56,7 +56,7 @@ const MOCK_EXPLANATIONS: Record<Severity, string[]> = {
 /** Weighted so most simulated attacks look like they failed, a few succeed — realistic-looking demo data. */
 function randomSeverity(): Severity {
   const r = Math.random();
-  if (r < 0.45) return "none";
+  if (r < 0.45) return "pass";
   if (r < 0.7) return "low";
   if (r < 0.85) return "medium";
   if (r < 0.95) return "high";
@@ -69,7 +69,7 @@ function pick<T>(items: T[]): T {
 
 function brokeForSeverity(severity: Severity): boolean {
   switch (severity) {
-    case "none":
+    case "pass":
     case "low":
       return false;
     case "medium":
@@ -83,7 +83,7 @@ function brokeForSeverity(severity: Severity): boolean {
 function mockTurnsFor(attack: Attack, response: string): TurnResult[] {
   return attack.turns.map((prompt, i) => ({
     prompt,
-    response: i === attack.turns.length - 1 ? response : pick(MOCK_RESPONSES.none),
+    response: i === attack.turns.length - 1 ? response : pick(MOCK_RESPONSES.pass),
     latencyMs: Math.round(120 + Math.random() * 900),
   }));
 }
@@ -100,6 +100,7 @@ export function generateMockResults(attacks: Attack[] = allAttacks): GradedResul
     const turns = mockTurnsFor(attack, response);
     const probe: ProbeResult = { attack, turns, finalResponse: response };
     const verdict: Verdict = {
+      errored: false,
       severity,
       broke: brokeForSeverity(severity),
       explanation: `[MOCK] ${pick(MOCK_EXPLANATIONS[severity])}`,
