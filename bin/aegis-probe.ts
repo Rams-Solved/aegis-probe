@@ -103,6 +103,26 @@ program
         `  ${DIM}just point --base-url/--judge-key/--judge-model at that provider instead.${RESET}`,
       ].join("\n"),
     );
+
+    lines.push(section("IN-SHELL COMMANDS") + `${DIM} (when running aegis-probe with no arguments)${RESET}`);
+    lines.push(
+      [
+        `  ${BOLD}list${RESET}  /  ${BOLD}--list${RESET}                                list built-in attacks`,
+        `  ${BOLD}category <name...>${RESET}  /  ${BOLD}--category <name...>${RESET}      filter next ${BOLD}run${RESET}/${BOLD}mock${RESET} (repeatable, accumulates)`,
+        `  ${BOLD}run${RESET} ${DIM}[--category ...] [--url ...] [--model ...]${RESET}       fire a real attack using the current session config`,
+        `  ${BOLD}mock${RESET} ${DIM}[--category ...]${RESET}                       run the local, no-network simulation`,
+        `  ${BOLD}--url${RESET} / ${BOLD}--key${RESET} / ${BOLD}--model${RESET} / ${BOLD}--header${RESET} / ${BOLD}--base-url${RESET} / ${BOLD}--judge-key${RESET} / ${BOLD}--judge-model${RESET} ${DIM}<value>${RESET}   set session config`,
+        `  ${BOLD}target <url>${RESET}                                 alias for ${BOLD}--url <url>${RESET} — also shown in the prompt`,
+        `  ${BOLD}target none${RESET}  /  ${BOLD}target clear${RESET}                    clear the configured target`,
+        `  ${BOLD}target errored${RESET}  /  ${BOLD}target failed${RESET}                re-run only errored attacks against the target`,
+        `  ${BOLD}spill${RESET}                                         raw, untruncated dump of the last results`,
+        `  ${BOLD}help${RESET}  /  ${BOLD}--help${RESET}  /  ${BOLD}-h${RESET}                             this text`,
+        `  ${BOLD}exit${RESET}  /  ${BOLD}quit${RESET}  ${DIM}(or Ctrl+C)${RESET}                          leave the shell`,
+        ``,
+        `  ${DIM}--output is a one-shot CLI flag only — the shell always renders a table; use ${RESET}spill${DIM} for raw text.${RESET}`,
+      ].join("\n"),
+    );
+
     lines.push("");
     return lines.join("\n");
   });
@@ -122,19 +142,83 @@ function parseHeaders(headerArgs: string[] | undefined): Record<string, string> 
   return headers;
 }
 
+function printAttackList(): void {
+  console.log(`\n${banner()}\n`);
+  for (const category of CATEGORIES) {
+    console.log(`${BOLD}${CYAN}${category}${RESET}`);
+    for (const attack of attacksByCategory[category]) {
+      console.log(`  ${GRAY}${attack.id}${RESET}  ${attack.name} ${DIM}(${attack.turns.length} turn${attack.turns.length > 1 ? "s" : ""})${RESET}`);
+    }
+    console.log("");
+  }
+}
+
+/**
+ * Shared post-validation run orchestration: banner/target/judge display,
+ * free-tier warning, spinner, runAttacks + gradeAll. Used by both the
+ * one-shot CLI `--url` path (main()) and the REPL's `run` command, so
+ * there is exactly one place that ever calls runAttacks/gradeAll for a
+ * real (non-mock) attack — no attack-execution or grading logic lives
+ * here, just orchestration shared to avoid the two paths drifting apart.
+ */
+async function executeRealRun(
+  target: TargetConfig,
+  judge: JudgeConfig | undefined,
+  attacks: Attack[],
+  outputFormat: "json" | "table",
+): Promise<GradedResult[]> {
+  const isTable = outputFormat === "table";
+  const freeTier = isFreeTierJudge(judge);
+  const throttleMs = freeTier ? FREE_TIER_THROTTLE_MS : undefined;
+
+  if (isTable) {
+    console.error(`\n${banner()}\n`);
+    console.error(`${DIM}target ${RESET}${target.url}${target.model ? ` ${GRAY}(model: ${target.model})${RESET}` : ""}`);
+    console.error(
+      judge
+        ? `${DIM}judge  ${RESET}${judge.model} ${GRAY}@ ${judge.baseUrl}${RESET}`
+        : `${DIM}judge  ${RESET}free keyword matcher ${GRAY}(pass --base-url/--judge-key/--judge-model for LLM grading)${RESET}`,
+    );
+    console.error("");
+  }
+
+  if (freeTier) {
+    console.error(
+      warningBlock(
+        "Free tier configuration detected. Adding execution delays to prevent upstream 429 rate limits. Remember to keep your production keys hidden!",
+        "caution",
+      ),
+    );
+    console.error("");
+  }
+
+  const spinner = new Spinner();
+  if (isTable) spinner.start();
+
+  const results = await runAttacks(target, attacks, {
+    throttleMs,
+    onAttackStart: (attack, index, total) => {
+      if (isTable) spinner.setSuffix(`[${index + 1}/${total}] ${attack.id} · ${attack.category}`);
+    },
+  });
+
+  const graded = await gradeAll(results, judge, {
+    throttleMs,
+    onProgress: (index, total) => {
+      if (isTable) spinner.setSuffix(`grading [${index + 1}/${total}]`);
+    },
+  });
+
+  spinner.stop();
+  return graded;
+}
+
 async function main() {
   program.parse(process.argv);
   const opts = program.opts();
 
   if (opts.list) {
-    console.log(`\n${banner()}\n`);
-    for (const category of CATEGORIES) {
-      console.log(`${BOLD}${CYAN}${category}${RESET}`);
-      for (const attack of attacksByCategory[category]) {
-        console.log(`  ${GRAY}${attack.id}${RESET}  ${attack.name} ${DIM}(${attack.turns.length} turn${attack.turns.length > 1 ? "s" : ""})${RESET}`);
-      }
-      console.log("");
-    }
+    printAttackList();
     return;
   }
 
@@ -196,48 +280,7 @@ async function main() {
     headers: parseHeaders(opts.header),
   };
 
-  const freeTier = isFreeTierJudge(judge);
-  const throttleMs = freeTier ? FREE_TIER_THROTTLE_MS : undefined;
-
-  if (isTable) {
-    console.error(`\n${banner()}\n`);
-    console.error(`${DIM}target ${RESET}${target.url}${target.model ? ` ${GRAY}(model: ${target.model})${RESET}` : ""}`);
-    console.error(
-      judge
-        ? `${DIM}judge  ${RESET}${judge.model} ${GRAY}@ ${judge.baseUrl}${RESET}`
-        : `${DIM}judge  ${RESET}free keyword matcher ${GRAY}(pass --base-url/--judge-key/--judge-model for LLM grading)${RESET}`,
-    );
-    console.error("");
-  }
-
-  if (freeTier) {
-    console.error(
-      warningBlock(
-        "Free tier configuration detected. Adding execution delays to prevent upstream 429 rate limits. Remember to keep your production keys hidden!",
-        "caution",
-      ),
-    );
-    console.error("");
-  }
-
-  const spinner = new Spinner();
-  if (isTable) spinner.start();
-
-  const results = await runAttacks(target, attacks, {
-    throttleMs,
-    onAttackStart: (attack, index, total) => {
-      if (isTable) spinner.setSuffix(`[${index + 1}/${total}] ${attack.id} · ${attack.category}`);
-    },
-  });
-
-  const graded = await gradeAll(results, judge, {
-    throttleMs,
-    onProgress: (index, total) => {
-      if (isTable) spinner.setSuffix(`grading [${index + 1}/${total}]`);
-    },
-  });
-
-  spinner.stop();
+  const graded = await executeRealRun(target, judge, attacks, outputFormat);
 
   lastResults = graded;
   console.log(formatReport(graded, outputFormat));
@@ -307,9 +350,9 @@ function printPostTableHints(results: GradedResult[]): void {
  * fresh results back into `lastResults` by attack id so everything else in
  * the table is left untouched. Reuses runAttacks/gradeAll exactly as the
  * one-shot CLI path does — no attack-execution or grading logic here, just
- * orchestration. Grades with the free keyword matcher: the REPL has no
- * --key/--judge-* equivalent yet, so a retargeted run is unauthenticated
- * and ungraded-by-LLM by design, same as any other REPL-driven run today.
+ * orchestration. Grades with the free keyword matcher: retargeting is
+ * unauthenticated/ungraded-by-LLM by design (mirrors `run` when no judge
+ * or key has been configured in the session).
  */
 async function retargetErrored(currentTarget: string | undefined): Promise<void> {
   const erroredResults = lastResults?.filter((r) => r.verdict.errored) ?? [];
@@ -355,25 +398,287 @@ async function retargetErrored(currentTarget: string | undefined): Promise<void>
   printPostTableHints(lastResults);
 }
 
+/** Persistent in-shell configuration, built up across `--flag`/`target`/
+ * `category` commands and consumed by `run`/`mock`. */
+interface ReplSession {
+  url: string | undefined;
+  key: string | undefined;
+  model: string | undefined;
+  headers: Record<string, string>;
+  baseUrl: string | undefined;
+  judgeKey: string | undefined;
+  judgeModel: string | undefined;
+  categories: AttackCategory[];
+}
+
+function createReplSession(): ReplSession {
+  return {
+    url: undefined,
+    key: undefined,
+    model: undefined,
+    headers: {},
+    baseUrl: undefined,
+    judgeKey: undefined,
+    judgeModel: undefined,
+    categories: [],
+  };
+}
+
+/** Tokens recognized as CLI flags with an in-shell equivalent, split by how
+ * they're consumed. Kept next to parseInlineFlags so the two can't drift. */
+const CONFIG_FLAG_TOKENS = ["--url", "--key", "--model", "--header", "--base-url", "--judge-key", "--judge-model"];
+
+interface InlineFlags {
+  categories: string[];
+  url?: string;
+  key?: string;
+  model?: string;
+  headers: string[];
+  baseUrl?: string;
+  judgeKey?: string;
+  judgeModel?: string;
+  /** Real CLI flags with no in-shell effect (currently just --output). */
+  cliOnly: string[];
+  /** Tokens that aren't a recognized flag at all. */
+  unknown: string[];
+}
+
+/** Parses `--flag value` pairs out of a REPL line's tokens (e.g. everything
+ * after `run`/`mock`, or a whole config-setting line like `--url X --key Y`).
+ * Deliberately hand-rolled rather than re-invoking commander: commander's
+ * `Command` instance accumulates option state across calls, which would let
+ * flags from one REPL line silently leak into a later, unrelated one. */
+function parseInlineFlags(tokens: string[]): InlineFlags {
+  const flags: InlineFlags = { categories: [], headers: [], cliOnly: [], unknown: [] };
+  const isKnownCliFlag = (token: string) => program.options.some((o) => o.long === token || o.short === token);
+
+  let i = 0;
+  // Only consumes the next token as a value if it doesn't itself look like
+  // a flag — otherwise `--url --key sk-1` would silently swallow `--key`
+  // as the URL instead of leaving it to be parsed as its own flag.
+  const nextValue = (): string | undefined => {
+    const value = tokens[i + 1];
+    if (value === undefined || value.startsWith("-")) return undefined;
+    i += 1;
+    return value;
+  };
+
+  for (; i < tokens.length; i++) {
+    const token = tokens[i];
+    switch (token) {
+      case "--category": {
+        const value = nextValue();
+        if (value !== undefined) flags.categories.push(value);
+        else flags.unknown.push(token);
+        break;
+      }
+      case "--url": {
+        const value = nextValue();
+        if (value !== undefined) flags.url = value;
+        else flags.unknown.push(token);
+        break;
+      }
+      case "--key": {
+        const value = nextValue();
+        if (value !== undefined) flags.key = value;
+        else flags.unknown.push(token);
+        break;
+      }
+      case "--model": {
+        const value = nextValue();
+        if (value !== undefined) flags.model = value;
+        else flags.unknown.push(token);
+        break;
+      }
+      case "--header": {
+        const value = nextValue();
+        if (value !== undefined) flags.headers.push(value);
+        else flags.unknown.push(token);
+        break;
+      }
+      case "--base-url": {
+        const value = nextValue();
+        if (value !== undefined) flags.baseUrl = value;
+        else flags.unknown.push(token);
+        break;
+      }
+      case "--judge-key": {
+        const value = nextValue();
+        if (value !== undefined) flags.judgeKey = value;
+        else flags.unknown.push(token);
+        break;
+      }
+      case "--judge-model": {
+        const value = nextValue();
+        if (value !== undefined) flags.judgeModel = value;
+        else flags.unknown.push(token);
+        break;
+      }
+      case "--output": {
+        nextValue(); // consume the value if present; --output has no in-shell effect
+        flags.cliOnly.push(token);
+        break;
+      }
+      default: {
+        if (!token.startsWith("-")) {
+          flags.unknown.push(token);
+        } else if (isKnownCliFlag(token)) {
+          flags.cliOnly.push(token);
+        } else {
+          flags.unknown.push(token);
+        }
+      }
+    }
+  }
+  return flags;
+}
+
+/** First 4 chars + ellipsis — secrets are echoed back in confirmations so
+ * you can tell *which* key you set, without printing the whole thing. */
+function maskSecret(value: string): string {
+  return value.length <= 4 ? "•".repeat(value.length) : `${value.slice(0, 4)}…`;
+}
+
+function validateCategoryNames(names: string[]): { valid: AttackCategory[]; invalid: string[] } {
+  const valid: AttackCategory[] = [];
+  const invalid: string[] = [];
+  for (const name of names) {
+    if (CATEGORIES.includes(name as AttackCategory)) valid.push(name as AttackCategory);
+    else invalid.push(name);
+  }
+  return { valid, invalid };
+}
+
+/** Merges newly-validated category names into the session filter (union,
+ * matching the CLI's repeatable --category semantics) and reports back
+ * what happened so callers (bare `category` command vs. inline `run
+ * --category ...`) can each print their own confirmation. */
+function applyCategoryNames(names: string[], session: ReplSession): { added: AttackCategory[]; invalid: string[] } {
+  const { valid, invalid } = validateCategoryNames(names);
+  const added = valid.filter((c) => !session.categories.includes(c));
+  session.categories.push(...added);
+  return { added, invalid };
+}
+
+function resolveSessionAttacks(session: ReplSession): Attack[] {
+  if (session.categories.length === 0) return allAttacks;
+  return allAttacks.filter((a) => session.categories.includes(a.category));
+}
+
+/** Applies url/key/model/headers/baseUrl/judgeKey/judgeModel from a parsed
+ * inline-flags object onto the session, updating the prompt if the target
+ * changed. Returns a human-readable summary of what was set, for the
+ * caller to print (or fold into a bigger confirmation message). */
+function applyConfigFlags(
+  flags: InlineFlags,
+  session: ReplSession,
+  rl: ReturnType<typeof createInterface>,
+): string[] {
+  const applied: string[] = [];
+  if (flags.url !== undefined) {
+    session.url = flags.url;
+    rl.setPrompt(buildReplPrompt(session.url));
+    applied.push(`url: ${flags.url}`);
+  }
+  if (flags.key !== undefined) {
+    session.key = flags.key;
+    applied.push(`key: ${maskSecret(flags.key)}`);
+  }
+  if (flags.model !== undefined) {
+    session.model = flags.model;
+    applied.push(`model: ${flags.model}`);
+  }
+  if (flags.headers.length > 0) {
+    Object.assign(session.headers, parseHeaders(flags.headers));
+    applied.push(`header(s): ${flags.headers.join(", ")}`);
+  }
+  if (flags.baseUrl !== undefined) {
+    session.baseUrl = flags.baseUrl;
+    applied.push(`base-url: ${flags.baseUrl}`);
+  }
+  if (flags.judgeKey !== undefined) {
+    session.judgeKey = flags.judgeKey;
+    applied.push(`judge-key: ${maskSecret(flags.judgeKey)}`);
+  }
+  if (flags.judgeModel !== undefined) {
+    session.judgeModel = flags.judgeModel;
+    applied.push(`judge-model: ${flags.judgeModel}`);
+  }
+  return applied;
+}
+
+function printFlagWarnings(flags: InlineFlags): void {
+  for (const token of flags.cliOnly) {
+    console.log(
+      `${BOLD}${token}${RESET}${DIM} is a one-shot CLI flag only — the shell always renders a table; use ${RESET}${BOLD}spill${RESET}${DIM} for raw output.${RESET}`,
+    );
+  }
+  for (const token of flags.unknown) {
+    console.log(`${DIM}Unknown flag: ${RESET}${BOLD}${token}${RESET}${DIM}. Type ${RESET}${BOLD}help${RESET}${DIM} to see available commands.${RESET}`);
+  }
+}
+
+/**
+ * Fires a real attack against the session's configured target, using the
+ * session's category filter. Mirrors main()'s one-shot `--url` path via
+ * the shared executeRealRun — no attack-execution or grading logic lives
+ * here, just session-state plumbing.
+ */
+async function runReplRun(session: ReplSession): Promise<void> {
+  if (!session.url) {
+    console.log(
+      `${DIM}No target configured — set one with ${RESET}${BOLD}--url <endpoint>${RESET}${DIM} or ${RESET}${BOLD}target <url>${RESET}${DIM} first.${RESET}\n`,
+    );
+    return;
+  }
+
+  let judge: JudgeConfig | undefined;
+  if (session.baseUrl || session.judgeKey || session.judgeModel) {
+    if (!session.baseUrl || !session.judgeKey || !session.judgeModel) {
+      console.log(
+        `${DIM}LLM-judge grading requires all three of ${RESET}${BOLD}--base-url${RESET}${DIM}, ${RESET}${BOLD}--judge-key${RESET}${DIM}, and ${RESET}${BOLD}--judge-model${RESET}${DIM}. Set all three, or none, to use the free keyword grader.${RESET}\n`,
+      );
+      return;
+    }
+    judge = { baseUrl: session.baseUrl, key: session.judgeKey, model: session.judgeModel };
+  }
+
+  const attacks = resolveSessionAttacks(session);
+  if (attacks.length === 0) {
+    console.log(`${DIM}No attacks matched the current category filter.${RESET}\n`);
+    return;
+  }
+
+  const target: TargetConfig = {
+    url: session.url,
+    key: session.key,
+    model: session.model,
+    headers: session.headers,
+  };
+
+  const graded = await executeRealRun(target, judge, attacks, "table");
+  lastResults = graded;
+  console.log(formatReport(graded, "table"));
+  printPostTableHints(graded);
+}
+
 /**
  * A persistent interactive shell for aegis-probe, entered when the CLI is
- * launched with zero arguments. Deliberately minimal: `mock` runs the same
- * local simulation as `--mock`, `help` reuses commander's own formatted
- * help text, and `exit`/`quit` (or Ctrl+C) leave cleanly.
+ * launched with zero arguments.
  */
 async function runRepl(): Promise<void> {
   process.stdout.write("\x1b[2J\x1b[3J\x1b[H"); // clear screen + scrollback, cursor home
   console.log(`\n${banner()}\n${DIM}  adversarial red-teaming for LLM chat endpoints${RESET}\n`);
   console.log(
-    `${DIM}Type ${RESET}${BOLD}help${RESET}${DIM}, ${RESET}${BOLD}mock${RESET}${DIM}, ${RESET}${BOLD}target <url>${RESET}${DIM}, ${RESET}${BOLD}spill${RESET}${DIM}, or ${RESET}${BOLD}exit${RESET}${DIM}.${RESET}\n`,
+    `${DIM}Type ${RESET}${BOLD}help${RESET}${DIM} for the full command list — ${RESET}${BOLD}list${RESET}${DIM}, ${RESET}${BOLD}mock${RESET}${DIM}, ${RESET}${BOLD}run${RESET}${DIM}, ${RESET}${BOLD}category <name>${RESET}${DIM}, ${RESET}${BOLD}target <url>${RESET}${DIM}, ${RESET}${BOLD}spill${RESET}${DIM}, or ${RESET}${BOLD}exit${RESET}${DIM}.${RESET}\n`,
   );
 
-  let currentTarget: string | undefined;
+  const session = createReplSession();
 
   const rl = createInterface({
     input: process.stdin,
     output: process.stdout,
-    prompt: buildReplPrompt(currentTarget),
+    prompt: buildReplPrompt(session.url),
   });
 
   let closed = false;
@@ -410,58 +715,156 @@ async function runRepl(): Promise<void> {
 
     if (line) {
       const parts = line.split(/\s+/);
-      const cmd = parts[0].toLowerCase();
-      const rest = parts.slice(1).join(" ").trim();
+      const first = parts[0];
+      const rest = parts.slice(1);
 
-      switch (cmd) {
-        case "mock": {
+      // Anything starting with "-" is a flag-form invocation, typed as the
+      // first word of the line (e.g. `--list`, `--category x`, `--url y`).
+      if (first.startsWith("-")) {
+        if (first === "--list") {
+          printAttackList();
+        } else if (first === "--mock") {
           console.log("");
-          await runMock(allAttacks, "table", true);
+          const flags = parseInlineFlags(rest);
+          if (flags.categories.length > 0) {
+            const { invalid } = applyCategoryNames(flags.categories, session);
+            if (invalid.length > 0) {
+              console.log(`Error: unknown category value(s): ${invalid.join(", ")}. Valid categories: ${CATEGORIES.join(", ")}\n`);
+            }
+          }
+          printFlagWarnings(flags);
+          await runMock(resolveSessionAttacks(session), "table", true);
           if (lastResults) printPostTableHints(lastResults);
-          break;
-        }
-        case "help": {
+        } else if (first === "--help" || first === "-h") {
           // outputHelp() (not helpInformation()) so the addHelpText hooks —
-          // QUICK START, EXAMPLES, judge setup — render exactly as they do
-          // for `--help`, not just the bare usage/options block.
+          // QUICK START, EXAMPLES, judge setup, IN-SHELL COMMANDS — render
+          // exactly as they do for `--help`, not just the bare usage block.
           program.outputHelp();
-          break;
-        }
-        case "spill": {
-          if (!lastResults) {
-            console.log(`${DIM}No results yet — run ${RESET}${BOLD}mock${RESET}${DIM} first.${RESET}\n`);
+        } else if (first === "--category") {
+          const { added, invalid } = applyCategoryNames(rest, session);
+          if (invalid.length > 0) {
+            console.log(`Error: unknown category value(s): ${invalid.join(", ")}. Valid categories: ${CATEGORIES.join(", ")}\n`);
           } else {
-            console.log(formatSpill(lastResults));
-            console.log("");
+            console.log(
+              `${DIM}category filter: ${RESET}${session.categories.length > 0 ? session.categories.join(", ") : "all (no filter)"}${DIM} ${added.length > 0 ? `(added ${added.join(", ")})` : ""}${RESET}\n`,
+            );
           }
-          break;
-        }
-        case "target": {
-          if (!rest) {
-            console.log(`${DIM}target: ${RESET}${currentTarget ?? "none"}\n`);
-          } else if (rest.toLowerCase() === "none" || rest.toLowerCase() === "clear") {
-            currentTarget = undefined;
-            rl.setPrompt(buildReplPrompt(currentTarget));
-            console.log(`${DIM}target cleared.${RESET}\n`);
-          } else if (rest.toLowerCase() === "errored" || rest.toLowerCase() === "failed") {
-            await retargetErrored(currentTarget);
-          } else {
-            currentTarget = rest;
-            rl.setPrompt(buildReplPrompt(currentTarget));
-            console.log(`${DIM}target set to ${RESET}${BOLD}${currentTarget}${RESET}\n`);
+        } else if (CONFIG_FLAG_TOKENS.includes(first)) {
+          const flags = parseInlineFlags(parts);
+          const applied = applyConfigFlags(flags, session, rl);
+          printFlagWarnings(flags);
+          if (applied.length > 0) {
+            console.log(`${DIM}session updated → ${RESET}${applied.join(", ")}\n`);
           }
-          break;
-        }
-        case "exit":
-        case "quit": {
-          process.exitCode = 0;
-          rl.close();
-          break;
-        }
-        default: {
+        } else if (first === "--output") {
           console.log(
-            `${DIM}Unknown command: ${RESET}${BOLD}${cmd}${RESET}${DIM}. Type ${RESET}${BOLD}help${RESET}${DIM} to see available commands.${RESET}\n`,
+            `${BOLD}--output${RESET}${DIM} is a one-shot CLI flag only — the shell always renders a table; use ${RESET}${BOLD}spill${RESET}${DIM} for raw output.${RESET}\n`,
           );
+        } else {
+          const known = program.options.some((o) => o.long === first || o.short === first);
+          console.log(
+            known
+              ? `${BOLD}${first}${RESET}${DIM} is a CLI-only flag with no in-shell effect yet.${RESET}\n`
+              : `${DIM}Unknown flag: ${RESET}${BOLD}${first}${RESET}${DIM}. Type ${RESET}${BOLD}help${RESET}${DIM} to see available commands.${RESET}\n`,
+          );
+        }
+      } else {
+        const cmd = first.toLowerCase();
+        switch (cmd) {
+          case "list": {
+            printAttackList();
+            break;
+          }
+          case "category": {
+            if (rest.length === 0) {
+              console.log(
+                `${DIM}category filter: ${RESET}${session.categories.length > 0 ? session.categories.join(", ") : "all (no filter)"}${DIM} — applies to the next ${RESET}${BOLD}run${RESET}${DIM}/${RESET}${BOLD}mock${RESET}${DIM}.${RESET}\n`,
+              );
+            } else if (["none", "all", "clear"].includes(rest[0].toLowerCase())) {
+              session.categories = [];
+              console.log(`${DIM}category filter cleared (all categories).${RESET}\n`);
+            } else {
+              const { added, invalid } = applyCategoryNames(rest, session);
+              if (invalid.length > 0) {
+                console.log(`Error: unknown category value(s): ${invalid.join(", ")}. Valid categories: ${CATEGORIES.join(", ")}\n`);
+              } else {
+                console.log(
+                  `${DIM}category filter: ${RESET}${session.categories.join(", ")}${DIM} ${added.length > 0 ? `(added ${added.join(", ")})` : ""}${RESET}\n`,
+                );
+              }
+            }
+            break;
+          }
+          case "run": {
+            console.log("");
+            const flags = parseInlineFlags(rest);
+            if (flags.categories.length > 0) {
+              const { invalid } = applyCategoryNames(flags.categories, session);
+              if (invalid.length > 0) {
+                console.log(`Error: unknown category value(s): ${invalid.join(", ")}. Valid categories: ${CATEGORIES.join(", ")}\n`);
+              }
+            }
+            applyConfigFlags(flags, session, rl);
+            printFlagWarnings(flags);
+            await runReplRun(session);
+            break;
+          }
+          case "mock": {
+            console.log("");
+            const flags = parseInlineFlags(rest);
+            if (flags.categories.length > 0) {
+              const { invalid } = applyCategoryNames(flags.categories, session);
+              if (invalid.length > 0) {
+                console.log(`Error: unknown category value(s): ${invalid.join(", ")}. Valid categories: ${CATEGORIES.join(", ")}\n`);
+              }
+            }
+            applyConfigFlags(flags, session, rl);
+            printFlagWarnings(flags);
+            await runMock(resolveSessionAttacks(session), "table", true);
+            if (lastResults) printPostTableHints(lastResults);
+            break;
+          }
+          case "help": {
+            program.outputHelp();
+            break;
+          }
+          case "spill": {
+            if (!lastResults) {
+              console.log(`${DIM}No results yet — run ${RESET}${BOLD}mock${RESET}${DIM} or ${RESET}${BOLD}run${RESET}${DIM} first.${RESET}\n`);
+            } else {
+              console.log(formatSpill(lastResults));
+              console.log("");
+            }
+            break;
+          }
+          case "target": {
+            const rest2 = rest.join(" ").trim();
+            if (!rest2) {
+              console.log(`${DIM}target: ${RESET}${session.url ?? "none"}\n`);
+            } else if (rest2.toLowerCase() === "none" || rest2.toLowerCase() === "clear") {
+              session.url = undefined;
+              rl.setPrompt(buildReplPrompt(session.url));
+              console.log(`${DIM}target cleared.${RESET}\n`);
+            } else if (rest2.toLowerCase() === "errored" || rest2.toLowerCase() === "failed") {
+              await retargetErrored(session.url);
+            } else {
+              session.url = rest2;
+              rl.setPrompt(buildReplPrompt(session.url));
+              console.log(`${DIM}target set to ${RESET}${BOLD}${session.url}${RESET}\n`);
+            }
+            break;
+          }
+          case "exit":
+          case "quit": {
+            process.exitCode = 0;
+            rl.close();
+            break;
+          }
+          default: {
+            console.log(
+              `${DIM}Unknown command: ${RESET}${BOLD}${cmd}${RESET}${DIM}. Type ${RESET}${BOLD}help${RESET}${DIM} to see available commands.${RESET}\n`,
+            );
+          }
         }
       }
     }

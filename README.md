@@ -54,18 +54,30 @@ aegis-probe
 ```
 
 ```
-aegis [target: none] ❯ help                                # print the full help layout
-aegis [target: none] ❯ target https://api.example.com/chat  # set a target — shown in the prompt
-aegis [target: https://api.example.com/chat] ❯ mock         # run the local --mock simulation inline
-aegis [target: https://api.example.com/chat] ❯ spill        # raw, untruncated dump of the last results
-aegis [target: https://api.example.com/chat] ❯ target errored  # (alias: target failed) re-run only errored attacks
-aegis [target: https://api.example.com/chat] ❯ target none  # clear the target back to 'none'
-aegis [target: none] ❯ exit                                 # (or quit, or Ctrl+C) leave cleanly
+aegis [target: none] ❯ --url https://api.example.com/chat   # (or: target https://api.example.com/chat)
+aegis [target: https://api.example.com/chat] ❯ --key sk-...          # session config — echoed back masked
+aegis [target: https://api.example.com/chat] ❯ category role-hijacking  # filter the next run/mock (repeatable)
+aegis [target: https://api.example.com/chat] ❯ run                  # fire a real attack using the session config
+aegis [target: https://api.example.com/chat] ❯ mock                 # or: run the local, no-network simulation
+aegis [target: https://api.example.com/chat] ❯ spill                # raw, untruncated dump of the last results
+aegis [target: https://api.example.com/chat] ❯ target errored       # (alias: target failed) re-run only errored attacks
+aegis [target: https://api.example.com/chat] ❯ target none          # clear the target back to 'none'
+aegis [target: none] ❯ exit                                          # (or quit, or Ctrl+C) leave cleanly
 ```
 
-The results table wraps long attack/note text instead of truncating it, and re-renders automatically if you resize the terminal. If the wrapped table still isn't what you want to read, `spill` prints every result as plain, borderless, un-wrapped text.
+Every CLI flag has an in-shell equivalent, and `help` (or `--help`/`-h`) always lists both forms so they can't drift apart:
 
-`target errored` (alias `target failed`) re-runs only the attacks that errored out — network error, rate-limit/429, timeout, or an empty/malformed response — against the currently configured target, and merges the fresh results back into the table by attack id; everything else is left untouched. It grades with the free keyword matcher (the shell has no `--key`/judge-config equivalent yet). Note: `mock` never produces errored attacks by design (it's a pure local simulation), so today the only way to actually populate errored results is a real `--url` run outside the shell — `target errored` is ready for a future in-shell "run against target" command.
+- `list` / `--list` — list built-in attacks
+- `category <name...>` / `--category <name...>` — filter the next `run`/`mock` (repeatable — accumulates across calls)
+- `run` — fires a real attack against the session's configured target; `mock` runs the local simulation instead. Both accept inline flags for one call, e.g. `run --category role-hijacking --url https://... --model gpt-4o-mini` — inline flags also update the session, so a later bare `run`/`mock` reuses them
+- `--url` / `--key` / `--model` / `--header` / `--base-url` / `--judge-key` / `--judge-model <value>` — set session config directly (`--url` is an alias for `target <url>`); secrets are echoed back masked (`sk-1…`), never in full
+- `target <url>`, `target none`/`target clear`, `target errored`/`target failed` — as above
+- `spill` — raw, untruncated dump of the last results; shown as a hint after every table
+- Anything that's a real CLI flag but has no in-shell effect (currently just `--output` — the shell always renders a table; use `spill` instead) is rejected with a hint naming the alternative, not a bare "Unknown command"
+
+The results table wraps long attack/note text instead of truncating it, and re-renders automatically if you resize the terminal.
+
+`target errored` (alias `target failed`) re-runs only the attacks that errored out — network error, rate-limit/429, timeout, or an empty/malformed response — against the currently configured target, and merges the fresh results back into the table by attack id; everything else is left untouched.
 
 Any invocation with at least one argument (`--mock`, `--list`, `--url ...`, `--help`, etc.) skips the shell entirely and runs as a normal one-shot command.
 
