@@ -1,4 +1,4 @@
-#!/usr/bin/env -S npx tsx
+#!/usr/bin/env node
 import { Command } from "commander";
 import { createInterface } from "node:readline/promises";
 import { allAttacks, attacksByCategory } from "../src/attacks/index.js";

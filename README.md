@@ -20,8 +20,29 @@ This is **not** an exhaustive jailbreak benchmark — it's a fast first pass to 
 
 ## Install
 
+Run it straight from npm, no local clone needed:
+
 ```bash
-git clone <this repo>
+npx aegis-probe --url https://your-endpoint.example.com/v1/chat
+```
+
+Or install it globally for a persistent `aegis-probe` command:
+
+```bash
+npm install -g aegis-probe
+aegis-probe --url https://your-endpoint.example.com/v1/chat
+```
+
+No target yet? Try it with zero setup:
+
+```bash
+npx aegis-probe --mock
+```
+
+### From source
+
+```bash
+git clone https://github.com/Rams-Solved/aegis-probe.git
 cd aegis-probe
 npm install
 ```
@@ -32,17 +53,12 @@ Run directly with `tsx` (no build step needed):
 npx tsx bin/aegis-probe.ts --url https://your-endpoint.example.com/v1/chat
 ```
 
-Or link it globally for a `aegis-probe` command:
+Or build it and link it globally for a `aegis-probe` command:
 
 ```bash
+npm run build
 npm link
 aegis-probe --url https://your-endpoint.example.com/v1/chat
-```
-
-No target yet? Try it with zero setup:
-
-```bash
-aegis-probe --mock
 ```
 
 ### Interactive shell
@@ -198,6 +214,16 @@ src/ui.ts                  Gradient text, spinner, banner, warning blocks
 ## Responsible use
 
 This tool is intended for testing systems you own or are authorized to test — pre-launch red-teaming, CI regression checks, or security research with permission. Don't point it at third-party production systems without authorization.
+
+## Development
+
+```bash
+npm install
+npm run typecheck
+npm test
+```
+
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for how to add attacks or grading heuristics, and [SECURITY.md](./SECURITY.md) to report a vulnerability.
 
 ## License
 
