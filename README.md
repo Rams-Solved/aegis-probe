@@ -225,6 +225,10 @@ npm test
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md) for how to add attacks or grading heuristics, and [SECURITY.md](./SECURITY.md) to report a vulnerability.
 
+## About
+
+aegis-probe is built and maintained by [imelabs](https://imelabs.co.uk), makers of [Aegis](https://aegis.imelabs.co.uk) — adversarial AI and manipulation-literacy training for teams.
+
 ## License
 
 MIT — see [LICENSE](./LICENSE).
