@@ -227,7 +227,7 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for how to add attacks or grading heuri
 
 ## About
 
-aegis-probe is built and maintained by [imelabs](https://imelabs.co.uk), makers of [Aegis](https://aegis.imelabs.co.uk) — adversarial AI and manipulation-literacy training for teams.
+aegis-probe is built and maintained by [imelabs](https://imelabs.co.uk), makers of [Aegis](https://aegis.imelabs.co.uk) — adversarial AI simulation and manipulation-literacy training for teams.
 
 ## License
 
